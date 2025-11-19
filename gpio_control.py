@@ -37,3 +37,5 @@ def turn_display_On():
 def turn_display_Off():
     run_cmd(f"gpioset {GPIOCHIP} {DISPLAY_ON_PIN}=0")
     print("DISPLAY OFF")
+
+
