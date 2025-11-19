@@ -38,7 +38,7 @@ def read_du_from_serial(token, callback_ui_message, callback_ui_success):
     callback_ui_success(data) → send final parsed data to UI
     """
 
-    ser = serial.Serial("/dev/ttyS3", 115200, timeout=0.1)
+    ser = serial.Serial("/dev/ttyAMA0", 115200, timeout=0.1)
     received = ""
     start_time = time.time()
 
