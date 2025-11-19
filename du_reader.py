@@ -1,200 +1,164 @@
 import serial
 import time
-import binascii
-import requests
 import threading
-import os
-import csv
-from datetime import datetime
 
-# ---------------------------------------------------
-# Helper functions (you must fill logic for THESE)
-# ---------------------------------------------------
+from du_utils import (
+    calculate_crc16,
+    calculate_little_endian,
+)
+from decrypt_utils import decrypt_hex_block   # <-- your Decrypt(receivedData)
+from gpio_control import turn_BL_Detect_Low, turn_BL_Detect_High
 
-def calculate_crc16(data_bytes):
-    # TODO: implement same CRC16 as JS
-    return "0000"
-
-def calculate_little_endian(crc_value: int) -> str:
-    """
-    Convert integer CRC into a 2-byte little-endian hex string (lowercase).
-    Equivalent to JS:
-    ((crc >> 8) | ((crc & 0xFF) << 8)).toString(16).padStart(4, "0")
-    """
-    if not isinstance(crc_value, int):
-        # If accidentally passed hex string (like "abcd") convert it
-        crc_value = int(crc_value, 16)
-
-    le = ((crc_value >> 8) | ((crc_value & 0xFF) << 8)) & 0xFFFF
-    return f"{le:04x}"
+# Set this from the UI / main app
+isEncryptionEnable = False
+encryptedKeyIndex = (85, 117)   # SAME as JS
+KEY_FOR_ENCRYPTION = None
 
 
-def decrypt_hex(hex_string):
-    # TODO: implement Python equivalent for Decrypt() JS function
-    return hex_string
+class DUReader:
+    def __init__(self, serial_port, baud, callback_status, callback_error, callback_success):
+        self.serial_port = serial_port
+        self.baud = baud
 
-def get_encryption_flag(fw1, fw2):
-    # TODO: replicate getEncryptionFlag() from JS
-    return False
+        self.received_hex = ""              # EXACTLY like JS receivedData
+        self.buffer = b""                   # bytes from hex
+        self.callback_status = callback_status
+        self.callback_error = callback_error
+        self.callback_success = callback_success
 
-# ---------------------------------------------------
-# Main DU Read Logic
-# ---------------------------------------------------
+    def start(self):
+        threading.Thread(target=self.read_loop, daemon=True).start()
 
-def read_du_from_serial(token, callback_ui_message, callback_ui_success):
-    """
-    callback_ui_message(msg) → send status to UI
-    callback_ui_success(data) → send final parsed data to UI
-    """
+    def read_loop(self):
 
-    ser = serial.Serial("/dev/ttyAMA0", 115200, timeout=0.1)
-    received = ""
-    start_time = time.time()
+        turn_BL_Detect_High()
+        self.callback_status("Waiting for DU...")
 
-    callback_ui_message("Waiting for DU...")
-
-    # ---------------------------
-    # Receive up to 10 seconds
-    # ---------------------------
-    while True:
-        if time.time() - start_time > 10:
-            callback_ui_message("E31 - No data received during Handshake")
-            ser.close()
+        try:
+            ser = serial.Serial(self.serial_port, self.baud, timeout=0.5)
+        except Exception as e:
+            self.callback_error(f"Serial open error: {e}")
+            turn_BL_Detect_Low()
             return
 
-        if ser.in_waiting:
-            data = ser.read(ser.in_waiting)
-            received += binascii.hexlify(data).decode()
-            # print("Received:", received)
+        start_time = time.time()
 
-        if len(received) >= 1024:
-            break
+        while True:
 
-        time.sleep(0.05)
+            # Timeout like JS: 10 seconds without data
+            if time.time() - start_time > 10:
+                turn_BL_Detect_Low()
+                self.callback_error("E31 - No Data Received during Handshake")
+                ser.close()
+                return
 
-    # --------------------------------
-    # now parse the first 1024 bytes
-    # --------------------------------
-    buf = bytes.fromhex(received[:1024*2])
+            try:
+                data = ser.read(256)  # read chunk
+            except Exception as e:
+                turn_BL_Detect_Low()
+                self.callback_error(f"E14 - Serial Port Error: {e}")
+                ser.close()
+                return
 
-    SOP = buf[0]
-    EOP = buf[509]
-    fw1 = buf[393]
-    fw2 = buf[394]
+            if not data:
+                continue
 
-    encrypted = False
+            # Convert to hex string EXACTLY LIKE JS
+            chunk_hex = data.hex()
+            self.received_hex += chunk_hex
 
-    # --------------------------------
-    # Check if encrypted or not
-    # --------------------------------
-    if SOP == 0x2A and EOP == 0x3C:
-        # unencrypted
-        crc_calc = calculate_crc16(buf[:510])
-        if calculate_little_endian(crc_calc) != buf[510:512].hex():
-            callback_ui_message("E52 - Invalid Data Received")
+            # Debug
+            print("HEX += ", chunk_hex)
+            print("LEN:", len(self.received_hex))
+
+            # JS waits until >= 1024 hex chars (512 bytes)
+            if len(self.received_hex) < 1024:
+                continue
+
+            # Now convert full hex string to bytes (same as Buffer.from(hex,'hex'))
+            try:
+                self.buffer = bytes.fromhex(self.received_hex[:1024])
+            except Exception as e:
+                self.callback_error("Invalid HEX stream")
+                ser.close()
+                return
+
+            sop = f"{self.buffer[0]:02x}"
+            eop = f"{self.buffer[509]:02x}"
+
+            firmware1 = self.buffer[393]
+            firmware2 = self.buffer[394]
+
+            # -----------------------------
+            # STEP 1 — UNENCRYPTED DATA?
+            # -----------------------------
+            if sop == "2a" and eop == "3c":
+                print("UNENCRYPTED DATA detected")
+
+                # CRC CHECK
+                crc_calc = calculate_crc16(self.buffer[:510])
+                little_end = calculate_little_endian(crc_calc)
+                crc_recv = self.buffer[510:512].hex()
+
+                if little_end != crc_recv:
+                    self.callback_error("E52-Invalid Data Received")
+                    ser.close()
+                    return
+
+                global isEncryptionEnable
+                isEncryptionEnable = self.get_encryption_flag(firmware1, firmware2)
+
+            else:
+                # -----------------------------
+                # STEP 2 — ENCRYPTED DATA
+                # -----------------------------
+                print("ENCRYPTED DATA detected, decrypting...")
+
+                decrypted_hex = decrypt_hex_block(self.received_hex[:1024])
+                self.buffer = bytes.fromhex(decrypted_hex)
+
+                sop = f"{self.buffer[0]:02x}"
+                eop = f"{self.buffer[509]:02x}"
+
+                if sop != "2a" or eop != "3c":
+                    self.callback_error("E52-Invalid Data Received")
+                    ser.close()
+                    return
+
+                crc_calc = calculate_crc16(self.buffer[:510])
+                little_end = calculate_little_endian(crc_calc)
+                crc_recv = self.buffer[510:512].hex()
+
+                if little_end != crc_recv:
+                    self.callback_error("E52-Invalid Data Received")
+                    ser.close()
+                    return
+
+                isEncryptionEnable = self.get_encryption_flag(firmware1, firmware2)
+
+            # ----------------------------------------
+            # At this point, data is validated
+            # ----------------------------------------
+
+            # Extract DU and Display Numbers
+            duNumber = int(self.received_hex[4:20], 16)
+            displayNumber = int(self.received_hex[20:36], 16)
+
+            print("DU:", duNumber, "Display:", displayNumber)
+
             ser.close()
-            return
-        encrypted = False
-    else:
-        encrypted = True
-        decrypted_hex = decrypt_hex(received[:1024*2])
-        buf = bytes.fromhex(decrypted_hex)
+            turn_BL_Detect_Low()
 
-        SOP = buf[0]
-        EOP = buf[509]
-
-        crc_calc = calculate_crc16(buf[:510])
-        if calculate_little_endian(crc_calc) != buf[510:512].hex():
-            callback_ui_message("E52 - Invalid Encrypted Data")
-            ser.close()
+            # SUCCESS callback with DU + Display
+            self.callback_success({
+                "duNumber": duNumber,
+                "displayNumber": displayNumber,
+                "isEncryptionEnable": isEncryptionEnable
+            })
             return
 
-    # --------------------------------
-    # Extract fields
-    # --------------------------------
-
-    du_number = int(buf[2:10].hex(), 16)
-    display_number = int(buf[10:18].hex(), 16)
-    autoMode = buf[638]
-    onoff = int(buf[640:647].hex(), 16)
-
-    nozzle_offsets = [87, 223, 359, 495]
-    nozzles = []
-
-    for base in nozzle_offsets:
-        ID = buf[base]
-        amount = "{}.{}".format(
-            int(buf[base+1 : base+9].hex(),16),
-            int(buf[base+9 : base+13].hex(),16)
-        )
-        volume = "{}.{}".format(
-            int(buf[base+13 : base+21].hex(),16),
-            int(buf[base+21 : base+25].hex(),16)
-        )
-        kfactor = int(buf[base+25 : base+33].hex(),16)
-        date = buf[base+33]
-        month = buf[base+35]
-        year = buf[base+37]
-        hr = buf[base+39]
-        mn = buf[base+41]
-        sec = buf[base+43]
-        txn = int(buf[base+45 : base+53].hex(),16)
-        fw = f"{buf[base+53]}.{buf[base+54]}"
-        sha = buf[base+55 : base+119].hex()
-
-        nozzles.append({
-            "ID": ID,
-            "amount": amount,
-            "volume": volume,
-            "kfactor": kfactor,
-            "timestamp": f"{date}/{month}/{year}-{hr}:{mn}:{sec}",
-            "txn": txn,
-            "fw": fw,
-            "sha": sha
-        })
-
-    # --------------------------------
-    # Write CSV log
-    # --------------------------------
-    log_path = "Display_log.csv"
-    write_header = not os.path.exists(log_path)
-
-    with open(log_path, "a", newline="") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(["SrNo","Date","Time","DU","Display","autoMode","onoff","NozzleData"])
-
-        now = datetime.now()
-        nozzle_json = str(nozzles)
-        writer.writerow([
-            1, now.strftime("%d-%m-%Y"), now.strftime("%H:%M:%S"),
-            du_number, display_number, autoMode, onoff, nozzle_json
-        ])
-
-    # --------------------------------
-    # Send DU Update to Server
-    # --------------------------------
-
-    SERVER_URL = os.getenv("SERVER_URL")
-    TOKEN = token
-    DEVICE_ID = os.getenv("DEVICE_ID")
-
-    try:
-        url = f"{SERVER_URL}api/dispenserUnit/DU_Update"
-        headers = {
-            "Authorization": f"Bearer {TOKEN}",
-            "deviceID": DEVICE_ID,
-            "duNumber": str(du_number),
-            "displayNumber": str(display_number)
-        }
-
-        resp = requests.get(url, headers=headers)
-        options = resp.json()["response"]
-
-        ser.close()
-
-        callback_ui_success(options)
-
-    except Exception as e:
-        callback_ui_message(f"Error contacting server: {e}")
-        ser.close()
+    # Same logic as JS
+    def get_encryption_flag(self, fw1, fw2):
+        if fw1 >= 11 and fw2 >= 8:
+            return True
+        return False
