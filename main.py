@@ -5,6 +5,13 @@ from wifi_utils import scan_wifi, connect_wifi, check_internet, get_connected_ss
 from keyboard import OnScreenKeyboard
 from tkinter import messagebox
 
+from gpio_control import (
+    turn_BL_Detect_High,
+    turn_BL_Detect_Low,
+    turn_display_On,
+    turn_display_Off
+)
+
 import threading
 import time
 
@@ -242,6 +249,9 @@ class ProgramPage(ttk.Frame):
             command=self.start_program_logic
         ).pack(pady=100)
     def start_program_logic(self):
+        print("Turning pins HIGH, LED ON, Display ON")
+        turn_BL_Detect_High()
+        turn_display_On()
         from du_reader import read_du_from_serial
 
         def ui_message(msg):
