@@ -266,6 +266,31 @@ class ProgramPage(ttk.Frame):
             args=(self.controller.token, ui_message, ui_success),
             daemon=True
         ).start()
+    # inside ProgramPage class - on file selected & Download button pressed
+    def on_download_and_flash(self, selected_file_id):
+        token = self.controller.token
+        device_id = os.getenv("DEVICE_ID", "UNKNOWN")
+        is_encryption = self.controller.is_encryption_enable if hasattr(self.controller, "is_encryption_enable") else False
+
+        def ui_msg(s): 
+            print("STATUS:", s)
+            # update a label in GUI via after if needed
+            self.controller.after(0, lambda: self.status_label.config(text=s))
+
+        def ui_success(data):
+            print("SUCCESS:", data)
+            self.controller.after(0, lambda: messagebox.showinfo("Success", "Flashed successfully"))
+
+        def ui_error(err):
+            print("ERROR:", err)
+            self.controller.after(0, lambda: messagebox.showerror("Error", err))
+
+        threading.Thread(
+            target=download_and_flash,
+            args=(selected_file_id, token, device_id, is_encryption, ui_msg, ui_success, ui_error),
+            daemon=True
+        ).start()
+
 
 
 
