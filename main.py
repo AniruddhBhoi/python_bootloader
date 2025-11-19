@@ -12,7 +12,10 @@ from gpio_control import (
     turn_display_Off
 )
 
-import threading
+
+import threading 
+from du_reader import read_du_from_serial
+
 import time
 
 

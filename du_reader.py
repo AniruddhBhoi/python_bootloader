@@ -1,164 +1,333 @@
-import serial
+# du_reader.py
+import os
 import time
-import threading
+import requests
+import serial
+from typing import Callable
 
-from du_utils import (
-    calculate_crc16,
-    calculate_little_endian,
-)
-from decrypt_utils import decrypt_hex_block   # <-- your Decrypt(receivedData)
-from gpio_control import turn_BL_Detect_Low, turn_BL_Detect_High
+from decrypt_utils import decrypt_hex_block
+from du_utils import calculate_crc16, calculate_little_endian
+from gpio_control import turn_BL_Detect_High, turn_BL_Detect_Low
 
-# Set this from the UI / main app
-isEncryptionEnable = False
-encryptedKeyIndex = (85, 117)   # SAME as JS
-KEY_FOR_ENCRYPTION = None
+# Configurable defaults
+DEFAULT_SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyS3")
+DEFAULT_BAUDRATE = int(os.getenv("SERIAL_BAUD", "115200"))
+HANDSHAKE_TIMEOUT = 10  # seconds
+REQUIRED_HEX_LENGTH = 1024  # hex chars == 512 bytes
 
 
-class DUReader:
-    def __init__(self, serial_port, baud, callback_status, callback_error, callback_success):
-        self.serial_port = serial_port
-        self.baud = baud
+def get_encryption_flag(fw1: int, fw2: int) -> bool:
+    """
+    Port of getEncryptionFlag (simple heuristic: firmware >= some version).
+    Adjust logic if you have a different rule.
+    """
+    try:
+        return (fw1 >= 11 and fw2 >= 8)
+    except Exception:
+        return False
 
-        self.received_hex = ""              # EXACTLY like JS receivedData
-        self.buffer = b""                   # bytes from hex
-        self.callback_status = callback_status
-        self.callback_error = callback_error
-        self.callback_success = callback_success
 
-    def start(self):
-        threading.Thread(target=self.read_loop, daemon=True).start()
+def _parse_du_and_display_from_buffer(buf: bytes):
+    """
+    JS used:
+      duStartIndex = 2
+      displayStartIndex = 10
+      displayEndIndex = 18
+    We'll convert those bytes to integers (big-endian) like Node's Number("0x" + slice)
+    """
+    du_number = int.from_bytes(buf[2:10], byteorder="big")
+    display_number = int.from_bytes(buf[10:18], byteorder="big")
+    return du_number, display_number
 
-    def read_loop(self):
 
-        turn_BL_Detect_High()
-        self.callback_status("Waiting for DU...")
+def read_du_from_serial(
+    token: str,
+    callback_ui_message: Callable[[str], None],
+    callback_ui_success: Callable[[dict], None],
+    callback_ui_error: Callable[[str], None],
+    serial_port: str = DEFAULT_SERIAL_PORT,
+    baudrate: int = DEFAULT_BAUDRATE,
+):
+    """
+    Blocking function that does the DU handshake. Call it from a worker thread.
 
+    Args:
+      token: auth token (Bearer)
+      callback_ui_message: fn(str) for status updates
+      callback_ui_success: fn(dict) on success (receives options from DU_Update API)
+      callback_ui_error: fn(str) on error
+      serial_port: device path (default '/dev/ttyS3')
+      baudrate: int baud
+
+    Behavior mirrors your JS:
+      - toggle BL_DETECT HIGH
+      - open serial
+      - accumulate hex chunks until >= 1024 chars (512 bytes)
+      - build buffer, check SOP/EOP; if mismatch -> decrypt_hex_block(receivedHex)
+      - check CRC using calculate_crc16() and calculate_little_endian()
+      - determine isEncryptionEnable via firmware bytes
+      - call DU_Update API with headers Authorization Bearer, deviceID, duNumber, displayNumber
+      - callback_ui_success(options) on success
+      - ensures turn_BL_Detect_Low() in error/final branches
+    """
+
+    try:
+        # raise BL detect high (start handshake)
         try:
-            ser = serial.Serial(self.serial_port, self.baud, timeout=0.5)
+            turn_BL_Detect_High()
         except Exception as e:
-            self.callback_error(f"Serial open error: {e}")
-            turn_BL_Detect_Low()
+            callback_ui_message(f"Warning: turn_BL_Detect_High failed: {e}")
+
+        callback_ui_message(f"Opening serial port {serial_port}...")
+        try:
+            ser = serial.Serial(serial_port, baudrate=baudrate, timeout=0.5)
+        except Exception as e:
+            callback_ui_error(f"E14 - Serial Port Error during Handshake: {e}")
+            try:
+                turn_BL_Detect_Low()
+            except:
+                pass
             return
 
+        received_hex = ""
         start_time = time.time()
+        is_encryption_enable = False
+        buffer_bytes = b""
+
+        callback_ui_message("Waiting for DU...")
 
         while True:
-
-            # Timeout like JS: 10 seconds without data
-            if time.time() - start_time > 10:
-                turn_BL_Detect_Low()
-                self.callback_error("E31 - No Data Received during Handshake")
+            # timeout if nothing arrives for HANDSHAKE_TIMEOUT seconds
+            if time.time() - start_time > HANDSHAKE_TIMEOUT and len(received_hex) == 0:
+                try:
+                    turn_BL_Detect_Low()
+                except:
+                    pass
                 ser.close()
+                callback_ui_error("E31 - No data received during Handshake")
+                return
+
+            # read any available bytes
+            try:
+                chunk = ser.read(256)  # read up to 256 bytes
+            except Exception as e:
+                try:
+                    turn_BL_Detect_Low()
+                except:
+                    pass
+                ser.close()
+                callback_ui_error(f"E14 - Serial Port Error during Handshake: {e}")
+                return
+
+            if not chunk:
+                # no data right now, continue looping
+                continue
+
+            # reset handshake timer (we got some data)
+            start_time = time.time()
+
+            # append chunk as hex string (exactly like JS Buffer.toString('hex'))
+            chunk_hex = chunk.hex()
+            received_hex += chunk_hex
+
+            # debug update
+            callback_ui_message(f"Received hex length: {len(received_hex)}")
+
+            # wait until we have at least 1024 hex chars (512 bytes)
+            if len(received_hex) < REQUIRED_HEX_LENGTH:
+                continue
+
+            # Work with the first 1024 hex chars (512 bytes) like JS
+            first_block_hex = received_hex[:REQUIRED_HEX_LENGTH]
+            try:
+                buffer_bytes = bytes.fromhex(first_block_hex)
+            except Exception:
+                ser.close()
+                try:
+                    turn_BL_Detect_Low()
+                except:
+                    pass
+                callback_ui_error("Invalid hex data received")
+                return
+
+            # SOP / EOP (JS used bufferData[0] and bufferData[509])
+            SOP = f"{buffer_bytes[0]:02x}"
+            EOP = f"{buffer_bytes[509]:02x}"
+
+            # firmware bytes
+            firmware_v1 = buffer_bytes[393]
+            firmware_v2 = buffer_bytes[394]
+
+            # Try unencrypted flow first
+            try:
+                if SOP == "2a" and EOP == "3c":
+                    # unencrypted; check CRC
+                    crc_calc = calculate_crc16(buffer_bytes[:510])  # int
+                    little_end = calculate_little_endian(crc_calc)
+                    crc_recv = buffer_bytes[510:512].hex()
+                    if little_end != crc_recv:
+                        # invalid CRC
+                        try:
+                            turn_BL_Detect_Low()
+                        except:
+                            pass
+                        ser.close()
+                        callback_ui_error("E52 - Invalid Data Received")
+                        return
+                    is_encryption_enable = get_encryption_flag_from_fw(firmware_v1, firmware_v2)
+                else:
+                    # encrypted: decrypt the 1024 hex block using AES-CBC (Decrypt)
+                    callback_ui_message("Encrypted data received, decrypting...")
+                    try:
+                        decrypted_hex = decrypt_hex_block(first_block_hex)
+                    except Exception as e:
+                        ser.close()
+                        try:
+                            turn_BL_Detect_Low()
+                        except:
+                            pass
+                        callback_ui_error(f"E52 - Decrypt failed: {e}")
+                        return
+
+                    # convert decrypted hex to bytes and re-evaluate SOP/EOP/CRC/firmware
+                    try:
+                        buffer_bytes = bytes.fromhex(decrypted_hex)
+                    except Exception as e:
+                        ser.close()
+                        try:
+                            turn_BL_Detect_Low()
+                        except:
+                            pass
+                        callback_ui_error("E52 - Decrypted data invalid hex")
+                        return
+
+                    SOP = f"{buffer_bytes[0]:02x}"
+                    EOP = f"{buffer_bytes[509]:02x}"
+                    firmware_v1 = buffer_bytes[393]
+                    firmware_v2 = buffer_bytes[394]
+
+                    if SOP != "2a" or EOP != "3c":
+                        ser.close()
+                        try:
+                            turn_BL_Detect_Low()
+                        except:
+                            pass
+                        callback_ui_error("E52 - Invalid Data Received")
+                        return
+
+                    crc_calc = calculate_crc16(buffer_bytes[:510])
+                    little_end = calculate_little_endian(crc_calc)
+                    crc_recv = buffer_bytes[510:512].hex()
+                    if little_end != crc_recv:
+                        ser.close()
+                        try:
+                            turn_BL_Detect_Low()
+                        except:
+                            pass
+                        callback_ui_error("E52 - Invalid Data Received")
+                        return
+
+                    is_encryption_enable = get_encryption_flag_from_fw(firmware_v1, firmware_v2)
+
+            except Exception as e:
+                ser.close()
+                try:
+                    turn_BL_Detect_Low()
+                except:
+                    pass
+                callback_ui_error(f"Error validating data: {e}")
+                return
+
+            # Passed validation — extract DU & Display numbers
+            try:
+                du_number, display_number = _parse_du_and_display(buffer_bytes)
+            except Exception as e:
+                ser.close()
+                try:
+                    turn_BL_Detect_Low()
+                except:
+                    pass
+                callback_ui_error(f"Parsing DU/Display failed: {e}")
+                return
+
+            # close serial and pull BL pin low like JS
+            try:
+                ser.close()
+            except:
+                pass
+            try:
+                turn_BL_Detect_Low()
+            except:
+                pass
+
+            callback_ui_message(f"DU detected: {du_number}, Display: {display_number}")
+
+            # Now call DU_Update API to get file list
+            server_url = os.getenv("SERVER_URL")
+            device_id = os.getenv("DEVICE_ID", "")
+            if not server_url:
+                callback_ui_error("SERVER_URL not configured")
+                return
+
+            callback_ui_message("Querying server for DU update list...")
+            try:
+                resp = requests.get(
+                    f"{server_url}api/dispenserUnit/DU_Update",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "deviceID": f"{device_id}",
+                        "duNumber": str(du_number),
+                        "displayNumber": str(display_number),
+                    },
+                    timeout=20,
+                )
+            except Exception as e:
+                callback_ui_error(f"Error contacting server: {e}")
+                return
+
+            if resp.status_code != 200:
+                # try to parse error message
+                try:
+                    msg = resp.json().get("message", resp.text)
+                except Exception:
+                    msg = resp.text
+                if isinstance(msg, str) and "No DU Assigned" in msg:
+                    callback_ui_error("No DU Assigned")
+                else:
+                    callback_ui_error(f"DU_Update error: HTTP {resp.status_code}")
                 return
 
             try:
-                data = ser.read(256)  # read chunk
+                options = resp.json().get("response")
             except Exception as e:
-                turn_BL_Detect_Low()
-                self.callback_error(f"E14 - Serial Port Error: {e}")
-                ser.close()
+                callback_ui_error(f"Malformed DU_Update response: {e}")
                 return
 
-            if not data:
-                continue
-
-            # Convert to hex string EXACTLY LIKE JS
-            chunk_hex = data.hex()
-            self.received_hex += chunk_hex
-
-            # Debug
-            print("HEX += ", chunk_hex)
-            print("LEN:", len(self.received_hex))
-
-            # JS waits until >= 1024 hex chars (512 bytes)
-            if len(self.received_hex) < 1024:
-                continue
-
-            # Now convert full hex string to bytes (same as Buffer.from(hex,'hex'))
-            try:
-                self.buffer = bytes.fromhex(self.received_hex[:1024])
-            except Exception as e:
-                self.callback_error("Invalid HEX stream")
-                ser.close()
-                return
-
-            sop = f"{self.buffer[0]:02x}"
-            eop = f"{self.buffer[509]:02x}"
-
-            firmware1 = self.buffer[393]
-            firmware2 = self.buffer[394]
-
-            # -----------------------------
-            # STEP 1 — UNENCRYPTED DATA?
-            # -----------------------------
-            if sop == "2a" and eop == "3c":
-                print("UNENCRYPTED DATA detected")
-
-                # CRC CHECK
-                crc_calc = calculate_crc16(self.buffer[:510])
-                little_end = calculate_little_endian(crc_calc)
-                crc_recv = self.buffer[510:512].hex()
-
-                if little_end != crc_recv:
-                    self.callback_error("E52-Invalid Data Received")
-                    ser.close()
-                    return
-
-                global isEncryptionEnable
-                isEncryptionEnable = self.get_encryption_flag(firmware1, firmware2)
-
-            else:
-                # -----------------------------
-                # STEP 2 — ENCRYPTED DATA
-                # -----------------------------
-                print("ENCRYPTED DATA detected, decrypting...")
-
-                decrypted_hex = decrypt_hex_block(self.received_hex[:1024])
-                self.buffer = bytes.fromhex(decrypted_hex)
-
-                sop = f"{self.buffer[0]:02x}"
-                eop = f"{self.buffer[509]:02x}"
-
-                if sop != "2a" or eop != "3c":
-                    self.callback_error("E52-Invalid Data Received")
-                    ser.close()
-                    return
-
-                crc_calc = calculate_crc16(self.buffer[:510])
-                little_end = calculate_little_endian(crc_calc)
-                crc_recv = self.buffer[510:512].hex()
-
-                if little_end != crc_recv:
-                    self.callback_error("E52-Invalid Data Received")
-                    ser.close()
-                    return
-
-                isEncryptionEnable = self.get_encryption_flag(firmware1, firmware2)
-
-            # ----------------------------------------
-            # At this point, data is validated
-            # ----------------------------------------
-
-            # Extract DU and Display Numbers
-            duNumber = int(self.received_hex[4:20], 16)
-            displayNumber = int(self.received_hex[20:36], 16)
-
-            print("DU:", duNumber, "Display:", displayNumber)
-
-            ser.close()
-            turn_BL_Detect_Low()
-
-            # SUCCESS callback with DU + Display
-            self.callback_success({
-                "duNumber": duNumber,
-                "displayNumber": displayNumber,
-                "isEncryptionEnable": isEncryptionEnable
+            # success: return options to UI
+            callback_ui_success({
+                "duNumber": du_number,
+                "displayNumber": display_number,
+                "options": options,
+                "isEncryptionEnable": is_encryption_enable
             })
             return
 
-    # Same logic as JS
-    def get_encryption_flag(self, fw1, fw2):
-        if fw1 >= 11 and fw2 >= 8:
-            return True
-        return False
+    except Exception as exc:
+        try:
+            turn_BL_Detect_Low()
+        except:
+            pass
+        callback_ui_error(f"Unexpected error: {exc}")
+        return
+
+
+# helpers used above
+def _parse_du_and_display(buf: bytes):
+    du_number = int.from_bytes(buf[2:10], byteorder="big")
+    display_number = int.from_bytes(buf[10:18], byteorder="big")
+    return du_number, display_number
+
+
+def get_encryption_flag_from_fw(fw1: int, fw2: int) -> bool:
+    # port of your JS getEncryptionFlag (adjust if your JS uses different logic)
+    return get_encryption_flag(fw1, fw2) if 'get_encryption_flag' in globals() else (fw1 >= 11 and fw2 >= 8)
