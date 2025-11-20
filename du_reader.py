@@ -27,17 +27,24 @@ def get_encryption_flag(fw1: int, fw2: int) -> bool:
         return False
 
 
-def _parse_du_and_display_from_buffer(buf: bytes):
+def parse_du_and_display_from_hex(first_block_hex: str):
     """
-    JS used:
-      duStartIndex = 2
-      displayStartIndex = 10
-      displayEndIndex = 18
-    We'll convert those bytes to integers (big-endian) like Node's Number("0x" + slice)
+    first_block_hex: first 1024 hex chars (string) like JS receivedData.slice(0,1024)
+    JS used duStartIndex = 2, displayStartIndex = 10 (these are indices into the hex string).
+    This returns integers same as Node's Number("0x" + slice).
     """
-    du_number = int.from_bytes(buf[2:10], byteorder="big")
-    display_number = int.from_bytes(buf[10:18], byteorder="big")
+    du_start = 2
+    display_start = 10
+    display_end = 18
+
+    # slice returns hex substrings — interpret as big-endian hex numbers like JS
+    du_hex = first_block_hex[du_start:display_start]      # 8 hex chars -> 4 bytes
+    display_hex = first_block_hex[display_start:display_end]  # next 8 hex chars
+
+    du_number = int(du_hex, 16)
+    display_number = int(display_hex, 16)
     return du_number, display_number
+
 
 
 def read_du_from_serial(
