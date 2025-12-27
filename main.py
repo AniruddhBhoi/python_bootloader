@@ -2,8 +2,10 @@ import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from wifi_utils import scan_wifi, connect_wifi, check_internet, get_connected_ssid
-from keyboard import OnScreenKeyboard
+from virtual_keyboard import OnScreenKeyboard
 from tkinter import messagebox
+from ui_utils import LayoutManager
+import os
 
 from gpio_control import (
     turn_BL_Detect_High,
@@ -18,6 +20,7 @@ load_dotenv()
 
 import threading 
 from du_reader import read_du_from_serial
+from bootloader_download import download_and_flash
 
 import time
 
@@ -27,10 +30,25 @@ class App(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
         self.title("Setup Wizard")
-        self.attributes("-fullscreen", True)
+        # self.attributes("-fullscreen", True)
+
+        # Phone size simulation
+        SIM_WIDTH = 480
+        SIM_HEIGHT = 800
+        self.geometry(f"{SIM_WIDTH}x{SIM_HEIGHT}")
+
+        # Initialize Layout Manager with fixed size
+        self.lm = LayoutManager(self, width=SIM_WIDTH, height=SIM_HEIGHT)
+        
+        # Configure global style scaling
+        style = ttk.Style()
+        default_btn_size = 12 # Base size for buttons
+        style.configure('TButton', font=self.lm.font(default_btn_size))
+
 
         self.selected_ssid = None
         self.wifi_password = None
+        self.token = None 
 
         self.container = ttk.Frame(self)
         self.container.pack(fill="both", expand=True)
@@ -59,10 +77,15 @@ class ScanPage(ttk.Frame):
         super().__init__(parent)
 
         self.controller = controller
+        lm = self.controller.lm
 
-        ttk.Label(self, text="Connect to Wi-Fi", font=("Segoe UI", 42)).pack(pady=120)
-        ttk.Button(self, text="Scan Wi-Fi", padding=20, bootstyle=PRIMARY,
-                   command=self.start_scan).pack(pady=50)
+        # Centering Container
+        container = ttk.Frame(self)
+        container.place(relx=0.5, rely=0.5, anchor="center")
+
+        ttk.Label(container, text="Connect to Wi-Fi", font=lm.font(28)).pack(pady=lm.scaled(30))
+        ttk.Button(container, text="Scan Wi-Fi", padding=lm.scaled(20), bootstyle=PRIMARY,
+                   command=self.start_scan).pack(pady=lm.scaled(30))
 
     def start_scan(self):
         self.controller.show_frame(WifiConnectingPage)
@@ -81,13 +104,14 @@ class WifiListPage(ttk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        lm = self.controller.lm
 
-        ttk.Label(self, text="Available Networks", font=("Segoe UI", 36)).pack(pady=50)
-        self.listbox = tk.Listbox(self, font=("Segoe UI", 24), height=10)
-        self.listbox.pack(fill="both", expand=True, padx=50, pady=20)
+        ttk.Label(self, text="Available Networks", font=lm.font(28)).pack(pady=lm.scaled(50))
+        self.listbox = tk.Listbox(self, font=lm.font(14), height=10) # Height is in lines not pixels
+        self.listbox.pack(fill="both", expand=True, padx=lm.scaled(50), pady=lm.scaled(20))
 
-        ttk.Button(self, text="Next", padding=20, bootstyle=SUCCESS,
-                   command=self.go_next).pack(pady=40)
+        ttk.Button(self, text="Next", padding=lm.scaled(20), bootstyle=SUCCESS,
+                   command=self.go_next).pack(pady=lm.scaled(40))
 
     def load_list(self, ssids):
         self.listbox.delete(0, tk.END)
@@ -107,24 +131,25 @@ class WifiPasswordPage(ttk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        lm = self.controller.lm
         self.keyboard = None
 
-        ttk.Label(self, text="Enter Wi-Fi Password", font=("Segoe UI", 36)).pack(pady=60)
+        ttk.Label(self, text="Enter Wi-Fi Password", font=lm.font(28)).pack(pady=lm.scaled(60))
 
         frame = ttk.Frame(self)
-        frame.pack(pady=20, padx=60, fill="x")
+        frame.pack(pady=lm.scaled(20), padx=lm.scaled(60), fill="x")
 
-        self.password_entry = ttk.Entry(frame, font=("Segoe UI", 28), show="*")
-        self.password_entry.pack(side="left", fill="x", expand=True, ipady=10)
+        self.password_entry = ttk.Entry(frame, font=lm.font(28), show="*")
+        self.password_entry.pack(side="left", fill="x", expand=True, ipady=lm.scaled(10))
 
         # Show password button
         ttk.Button(frame, text="👁", width=5, bootstyle=INFO,
-                   command=self.toggle_password).pack(side="left", padx=10)
+                   command=self.toggle_password).pack(side="left", padx=lm.scaled(10))
 
         self.password_entry.bind("<FocusIn>", self.open_keyboard)
 
-        ttk.Button(self, text="Connect", padding=20, bootstyle=PRIMARY,
-                   command=self.start_connect).pack(pady=40)
+        ttk.Button(self, text="Connect", padding=lm.scaled(20), bootstyle=PRIMARY,
+                   command=self.start_connect).pack(pady=lm.scaled(40))
 
     def toggle_password(self):
         cur = self.password_entry.cget("show")
@@ -132,7 +157,8 @@ class WifiPasswordPage(ttk.Frame):
 
     def open_keyboard(self, _):
         self.close_keyboard()
-        self.keyboard = OnScreenKeyboard(self, self.password_entry, self.close_keyboard)
+        # Pass layout manager for scaling
+        self.keyboard = OnScreenKeyboard(self, self.password_entry, self.close_keyboard, self.controller.lm)
         self.keyboard.pack(side="bottom", fill="x")
 
     def close_keyboard(self):
@@ -194,23 +220,24 @@ class WifiConnectingPage(ttk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        lm = self.controller.lm
         self.mode = "wifi"   # can be "wifi" or "login"
         self.text = ""
         self.dots = 0
         self.is_cancelled = False
 
         # Title / Status text
-        self.label = ttk.Label(self, text="", font=("Segoe UI", 32))
-        self.label.pack(pady=150)
+        self.label = ttk.Label(self, text="", font=lm.font(28))
+        self.label.pack(pady=lm.scaled(150))
 
         # CANCEL Button
         ttk.Button(
             self,
             text="Cancel",
             bootstyle=DANGER,
-            padding=20,
+            padding=lm.scaled(20),
             command=self.cancel_connection
-        ).pack(pady=40)
+        ).pack(pady=lm.scaled(40))
 
         # Start animation loop
         self.animate()
@@ -244,16 +271,17 @@ class ProgramPage(ttk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        lm = self.controller.lm
 
-        ttk.Label(self, text="Welcome", font=("Segoe UI", 40)).pack(pady=100)
+        ttk.Label(self, text="Welcome", font=lm.font(40)).pack(pady=lm.scaled(100))
 
         ttk.Button(
             self,
             text="PROGRAM",
             bootstyle=PRIMARY,
-            padding=30,
+            padding=lm.scaled(30),
             command=self.start_program_logic
-        ).pack(pady=100)
+        ).pack(pady=lm.scaled(100))
 
     def start_program_logic(self):
         print("Turning pins HIGH, LED ON, Display ON")
@@ -284,7 +312,7 @@ class ProgramPage(ttk.Frame):
                 ui_message,
                 ui_success,
                 ui_error,
-                "/dev/ttyAMA0",   # RasPi UART
+                os.getenv("SERIAL_PORT", "/dev/ttyAMA0"),   # UART Port
                 115200
             ),
             daemon=True
@@ -324,39 +352,39 @@ class LoginPage(ttk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        lm = self.controller.lm
         self.keyboard = None
 
         # Title
-        ttk.Label(self, text="Sign In", font=("Segoe UI", 40)).pack(pady=40)
+        ttk.Label(self, text="Sign In", font=lm.font(40)).pack(pady=lm.scaled(40))
 
         # ---- MOBILE LABEL ----
-        ttk.Label(self, text="Mobile Number", font=("Segoe UI", 24)).pack(pady=(20, 5))
+        ttk.Label(self, text="Mobile Number", font=lm.font(24)).pack(pady=(lm.scaled(20), lm.scaled(5)))
 
-        self.phone = ttk.Entry(self, font=("Segoe UI", 28))
-        self.phone.pack(pady=(0, 30), padx=60, ipady=10, fill="x")
+        self.phone = ttk.Entry(self, font=lm.font(28))
+        self.phone.pack(pady=(0, lm.scaled(30)), padx=lm.scaled(60), ipady=lm.scaled(10), fill="x")
         self.phone.bind("<FocusIn>", lambda e: self.open_keyboard(self.phone))
 
         # ---- PASSWORD LABEL ----
-        ttk.Label(self, text="Password", font=("Segoe UI", 24)).pack(pady=(0, 5))
+        ttk.Label(self, text="Password", font=lm.font(24)).pack(pady=(0, lm.scaled(5)))
 
         pw_frame = ttk.Frame(self)
-        pw_frame.pack(pady=20, padx=60, fill="x")
+        pw_frame.pack(pady=lm.scaled(20), padx=lm.scaled(60), fill="x")
 
-        self.password = ttk.Entry(pw_frame, font=("Segoe UI", 28), show="*")
-        self.password.pack(side="left", fill="x", expand=True, ipady=10)
+        self.password = ttk.Entry(pw_frame, font=lm.font(28), show="*")
+        self.password.pack(side="left", fill="x", expand=True, ipady=lm.scaled(10))
 
         ttk.Button(
             pw_frame, text="👁", width=5, bootstyle=INFO,
             command=self.toggle_password
-        ).pack(side="left", padx=10)
+        ).pack(side="left", padx=lm.scaled(10))
 
         self.password.bind("<FocusIn>", lambda e: self.open_keyboard(self.password))
 
 
-        # --------- BUTTON ROW (FIXED GRID-ONLY APPROACH) ---------
         # --------- BUTTON ROW (FIXED & CLEAN) ---------
         btn_row = ttk.Frame(self)
-        btn_row.pack(pady=40, fill="x")
+        btn_row.pack(pady=lm.scaled(40), fill="x")
 
         # Configure columns for center alignment
         btn_row.columnconfigure(0, weight=1)
@@ -367,50 +395,28 @@ class LoginPage(ttk.Frame):
             btn_row,
             text="Sign In",
             bootstyle=SUCCESS,
-            padding=20,
+            padding=lm.scaled(20),
             command=self.start_login
         )
-        self.signin_btn.grid(row=0, column=0, padx=40, sticky="e")
+        self.signin_btn.grid(row=0, column=0, padx=lm.scaled(40), sticky="e")
 
         # Change Wi-Fi button
         self.change_wifi_btn = ttk.Button(
             btn_row,
             text="Change Wi-Fi",
             bootstyle=SECONDARY,
-            padding=20,
+            padding=lm.scaled(20),
             command=lambda: controller.show_frame(ScanPage)
         )
-        self.change_wifi_btn.grid(row=0, column=1, padx=40, sticky="w")
-
-
-        # Change Wi-Fi button
-        self.change_wifi_btn = ttk.Button(
-            btn_row,
-            text="Change Wi-Fi",
-            bootstyle=SECONDARY,
-            padding=20,
-            command=lambda: controller.show_frame(ScanPage)
-        )
-        self.change_wifi_btn.grid(row=0, column=1, padx=40, sticky="w")
-
+        self.change_wifi_btn.grid(row=0, column=1, padx=lm.scaled(40), sticky="w")
 
 
         # Change Wi-Fi button (hidden until needed)
-        self.change_wifi_btn = ttk.Button(
+        self.change_wifi_btn_hidden = ttk.Button(
             btn_row,
             text="Change Wi-Fi",
             bootstyle=SECONDARY,
-            padding=20,
-            command=lambda: controller.show_frame(ScanPage)
-        )
-
-
-        # Change Wi-Fi button (hidden until needed)
-        self.change_wifi_btn = ttk.Button(
-            btn_row,
-            text="Change Wi-Fi",
-            bootstyle=SECONDARY,
-            padding=20,
+            padding=lm.scaled(20),
             command=lambda: controller.show_frame(ScanPage)
         )
         # will be shown later using show_change_wifi_button()
@@ -454,7 +460,6 @@ class LoginPage(ttk.Frame):
 
 
     def show_change_wifi_button(self):
-    # already placed using grid → do nothing
         pass
 
 
@@ -466,7 +471,7 @@ class LoginPage(ttk.Frame):
     # Open keyboard
     def open_keyboard(self, entry):
         self.close_keyboard()
-        self.keyboard = OnScreenKeyboard(self, entry, self.close_keyboard)
+        self.keyboard = OnScreenKeyboard(self, entry, self.close_keyboard, self.controller.lm)
         self.keyboard.pack(side="bottom", fill="x")
 
     # Close keyboard
