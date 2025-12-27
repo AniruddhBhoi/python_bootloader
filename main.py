@@ -402,7 +402,7 @@ class LoginPage(ttk.Frame):
         self.keyboard = None
 
         # Title
-        ttk.Label(self, text="Sign In", font=lm.font(20)).pack(pady=lm.scaled(15))
+        ttk.Label(self, text="Log In", font=lm.font(20)).pack(pady=lm.scaled(15))
 
         # ---- MOBILE LABEL ----
         ttk.Label(self, text="Mobile Number", font=lm.font(12), foreground="white").pack(pady=(lm.scaled(10), lm.scaled(3)))
@@ -432,10 +432,10 @@ class LoginPage(ttk.Frame):
         btn_row = ttk.Frame(self)
         btn_row.pack(pady=lm.scaled(15))
 
-        # Sign In button
+        # Log In button
         self.signin_btn = ttk.Button(
             btn_row,
-            text="Sign In",
+            text="Log In",
             bootstyle=SUCCESS,
             padding=lm.scaled(12),
             command=self.start_login
