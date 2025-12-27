@@ -33,8 +33,8 @@ class App(ttk.Window):
         # self.attributes("-fullscreen", True)
 
         # Phone size simulation
-        SIM_WIDTH = 480
-        SIM_HEIGHT = 800
+        SIM_WIDTH=480 
+        SIM_HEIGHT=800 
         self.geometry(f"{SIM_WIDTH}x{SIM_HEIGHT}")
 
         # Initialize Layout Manager with fixed size
