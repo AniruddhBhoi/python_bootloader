@@ -2,7 +2,7 @@ import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from wifi_utils import scan_wifi, connect_wifi, check_internet, get_connected_ssid
-from virtual_keyboard import OnScreenKeyboard
+from t9_keypad import T9Keypad
 from tkinter import messagebox
 from ui_utils import LayoutManager
 import os
@@ -83,9 +83,9 @@ class ScanPage(ttk.Frame):
         container = ttk.Frame(self)
         container.place(relx=0.5, rely=0.5, anchor="center")
 
-        ttk.Label(container, text="Connect to Wi-Fi", font=lm.font(28)).pack(pady=lm.scaled(30))
+        ttk.Label(container, text="Connect to Wi-Fi", font=lm.font(24), foreground="white").pack(pady=lm.scaled(30))
         ttk.Button(container, text="Scan Wi-Fi", padding=lm.scaled(20), bootstyle=PRIMARY,
-                   command=self.start_scan).pack(pady=lm.scaled(30))
+                   command=self.start_scan).pack(pady=lm.scaled(120))
 
     def start_scan(self):
         self.controller.show_frame(WifiConnectingPage)
@@ -106,22 +106,62 @@ class WifiListPage(ttk.Frame):
         self.controller = controller
         lm = self.controller.lm
 
-        ttk.Label(self, text="Available Networks", font=lm.font(28)).pack(pady=lm.scaled(50))
-        self.listbox = tk.Listbox(self, font=lm.font(14), height=10) # Height is in lines not pixels
-        self.listbox.pack(fill="both", expand=True, padx=lm.scaled(50), pady=lm.scaled(20))
+        # Title with better spacing
+        ttk.Label(self, text="Available Networks", font=lm.font(24), foreground="white").pack(pady=lm.scaled(20))
+        
+        # Listbox with better styling
+        self.listbox = tk.Listbox(
+            self, 
+            font=lm.font(16), 
+            height=8,  # Show 8 networks at once
+            bg="#2d2d2d",  # Dark background
+            fg="white",  # White text
+            selectbackground="#00d4aa",  # Teal selection (matching ttkbootstrap success)
+            selectforeground="white",
+            highlightthickness=2,
+            highlightcolor="#00d4aa",
+            highlightbackground="#444444",
+            relief="flat",
+            borderwidth=0,
+            activestyle="none"
+        )
+        self.listbox.pack(fill="both", expand=True, padx=lm.scaled(30), pady=lm.scaled(20))
 
-        ttk.Button(self, text="Next", padding=lm.scaled(20), bootstyle=SUCCESS,
-                   command=self.go_next).pack(pady=lm.scaled(40))
+        # Next button with better styling
+        ttk.Button(
+            self, 
+            text="Next", 
+            padding=lm.scaled(15), 
+            bootstyle=SUCCESS,
+            command=self.go_next
+        ).pack(pady=lm.scaled(25))
 
     def load_list(self, ssids):
         self.listbox.delete(0, tk.END)
-        for s in ssids:
-            self.listbox.insert(tk.END, s)
+        # Add empty line at top for spacing
+        self.listbox.insert(tk.END, "")
+        for idx, s in enumerate(ssids):
+            # Add WiFi icon and padding
+            self.listbox.insert(tk.END, f"  📶  {s}")
+            # Add spacing between networks (except after last one)
+            if idx < len(ssids) - 1:
+                self.listbox.insert(tk.END, "")
 
     def go_next(self):
-        ssid = self.listbox.get(tk.ACTIVE)
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+        selected_text = self.listbox.get(selection[0]).strip()
+        # Remove WiFi icon and extra spaces to get the actual SSID
+        if selected_text.startswith("📶"):
+            ssid = selected_text.replace("📶", "").strip()
+        else:
+            ssid = selected_text
+        
+        # Skip if empty line selected
         if not ssid:
             return
+            
         self.controller.selected_ssid = ssid
         self.controller.show_frame(WifiPasswordPage)
 
@@ -134,22 +174,28 @@ class WifiPasswordPage(ttk.Frame):
         lm = self.controller.lm
         self.keyboard = None
 
-        ttk.Label(self, text="Enter Wi-Fi Password", font=lm.font(28)).pack(pady=lm.scaled(60))
+        # Title
+        ttk.Label(self, text="Enter Wi-Fi Password", font=lm.font(20)).pack(pady=lm.scaled(15))
 
-        frame = ttk.Frame(self)
-        frame.pack(pady=lm.scaled(20), padx=lm.scaled(60), fill="x")
+        # Password Label
+        ttk.Label(self, text="Password", font=lm.font(12), foreground="white").pack(pady=(lm.scaled(10), lm.scaled(3)))
 
-        self.password_entry = ttk.Entry(frame, font=lm.font(28), show="*")
-        self.password_entry.pack(side="left", fill="x", expand=True, ipady=lm.scaled(10))
+        # Password field frame
+        pw_field_frame = ttk.Frame(self)
+        pw_field_frame.pack(pady=lm.scaled(10), padx=lm.scaled(40), fill="x")
+
+        self.password_entry = ttk.Entry(pw_field_frame, font=lm.font(12), show="*")
+        self.password_entry.pack(side="left", fill="x", expand=True, ipady=lm.scaled(6))
 
         # Show password button
-        ttk.Button(frame, text="👁", width=5, bootstyle=INFO,
-                   command=self.toggle_password).pack(side="left", padx=lm.scaled(10))
+        ttk.Button(pw_field_frame, text="👁", width=4, bootstyle=INFO,
+                   command=self.toggle_password).pack(side="left", padx=lm.scaled(8))
 
         self.password_entry.bind("<FocusIn>", self.open_keyboard)
 
-        ttk.Button(self, text="Connect", padding=lm.scaled(20), bootstyle=PRIMARY,
-                   command=self.start_connect).pack(pady=lm.scaled(40))
+        # Connect button
+        ttk.Button(self, text="Connect", padding=lm.scaled(12), bootstyle=PRIMARY,
+                   command=self.start_connect).pack(pady=lm.scaled(15))
 
     def toggle_password(self):
         cur = self.password_entry.cget("show")
@@ -158,7 +204,7 @@ class WifiPasswordPage(ttk.Frame):
     def open_keyboard(self, _):
         self.close_keyboard()
         # Pass layout manager for scaling
-        self.keyboard = OnScreenKeyboard(self, self.password_entry, self.close_keyboard, self.controller.lm)
+        self.keyboard = T9Keypad(self, self.password_entry, self.close_keyboard, self.controller.lm)
         self.keyboard.pack(side="bottom", fill="x")
 
     def close_keyboard(self):
@@ -173,7 +219,7 @@ class WifiPasswordPage(ttk.Frame):
 
         self.controller.wifi_password = pwd
         connecting_page = self.controller.frames[WifiConnectingPage]
-        connecting_page.set_text(f"Connecting to {self.controller.selected_ssid}...")
+        connecting_page.set_text(f"Connecting to \n {self.controller.selected_ssid}...")
         self.controller.show_frame(WifiConnectingPage)
 
         threading.Thread(target=self.process_connect).start()
@@ -227,7 +273,7 @@ class WifiConnectingPage(ttk.Frame):
         self.is_cancelled = False
 
         # Title / Status text
-        self.label = ttk.Label(self, text="", font=lm.font(28))
+        self.label = ttk.Label(self, text="", font=lm.font(24))
         self.label.pack(pady=lm.scaled(150))
 
         # CANCEL Button
@@ -356,59 +402,55 @@ class LoginPage(ttk.Frame):
         self.keyboard = None
 
         # Title
-        ttk.Label(self, text="Sign In", font=lm.font(40)).pack(pady=lm.scaled(40))
+        ttk.Label(self, text="Sign In", font=lm.font(20)).pack(pady=lm.scaled(15))
 
         # ---- MOBILE LABEL ----
-        ttk.Label(self, text="Mobile Number", font=lm.font(24)).pack(pady=(lm.scaled(20), lm.scaled(5)))
+        ttk.Label(self, text="Mobile Number", font=lm.font(12), foreground="white").pack(pady=(lm.scaled(10), lm.scaled(3)))
 
-        self.phone = ttk.Entry(self, font=lm.font(28))
-        self.phone.pack(pady=(0, lm.scaled(30)), padx=lm.scaled(60), ipady=lm.scaled(10), fill="x")
+        self.phone = ttk.Entry(self, font=lm.font(12))
+        self.phone.pack(pady=(0, lm.scaled(10)), padx=lm.scaled(40), ipady=lm.scaled(6), fill="x")
         self.phone.bind("<FocusIn>", lambda e: self.open_keyboard(self.phone))
 
         # ---- PASSWORD LABEL ----
-        ttk.Label(self, text="Password", font=lm.font(24)).pack(pady=(0, lm.scaled(5)))
+        ttk.Label(self, text="Password", font=lm.font(12), foreground="white").pack(pady=(0, lm.scaled(3)))
 
         pw_frame = ttk.Frame(self)
-        pw_frame.pack(pady=lm.scaled(20), padx=lm.scaled(60), fill="x")
+        pw_frame.pack(pady=lm.scaled(10), padx=lm.scaled(40), fill="x")
 
-        self.password = ttk.Entry(pw_frame, font=lm.font(28), show="*")
-        self.password.pack(side="left", fill="x", expand=True, ipady=lm.scaled(10))
+        self.password = ttk.Entry(pw_frame, font=lm.font(12), show="*")
+        self.password.pack(side="left", fill="x", expand=True, ipady=lm.scaled(6))
 
         ttk.Button(
-            pw_frame, text="👁", width=5, bootstyle=INFO,
+            pw_frame, text="👁", width=4, bootstyle=INFO,
             command=self.toggle_password
-        ).pack(side="left", padx=lm.scaled(10))
+        ).pack(side="left", padx=lm.scaled(8))
 
         self.password.bind("<FocusIn>", lambda e: self.open_keyboard(self.password))
 
 
-        # --------- BUTTON ROW (FIXED & CLEAN) ---------
+        # --------- BUTTON ROW ---------
         btn_row = ttk.Frame(self)
-        btn_row.pack(pady=lm.scaled(40), fill="x")
-
-        # Configure columns for center alignment
-        btn_row.columnconfigure(0, weight=1)
-        btn_row.columnconfigure(1, weight=1)
+        btn_row.pack(pady=lm.scaled(15))
 
         # Sign In button
         self.signin_btn = ttk.Button(
             btn_row,
             text="Sign In",
             bootstyle=SUCCESS,
-            padding=lm.scaled(20),
+            padding=lm.scaled(12),
             command=self.start_login
         )
-        self.signin_btn.grid(row=0, column=0, padx=lm.scaled(40), sticky="e")
+        self.signin_btn.pack(side="left", padx=lm.scaled(10))
 
         # Change Wi-Fi button
         self.change_wifi_btn = ttk.Button(
             btn_row,
             text="Change Wi-Fi",
             bootstyle=SECONDARY,
-            padding=lm.scaled(20),
+            padding=lm.scaled(12),
             command=lambda: controller.show_frame(ScanPage)
         )
-        self.change_wifi_btn.grid(row=0, column=1, padx=lm.scaled(40), sticky="w")
+        self.change_wifi_btn.pack(side="left", padx=lm.scaled(10))
 
 
         # Change Wi-Fi button (hidden until needed)
@@ -471,7 +513,7 @@ class LoginPage(ttk.Frame):
     # Open keyboard
     def open_keyboard(self, entry):
         self.close_keyboard()
-        self.keyboard = OnScreenKeyboard(self, entry, self.close_keyboard, self.controller.lm)
+        self.keyboard = T9Keypad(self, entry, self.close_keyboard, self.controller.lm)
         self.keyboard.pack(side="bottom", fill="x")
 
     # Close keyboard
