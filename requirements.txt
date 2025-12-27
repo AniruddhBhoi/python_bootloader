@@ -1,6 +1,0 @@
-ttkbootstrap
-pyserial
-requests
-python-dotenv
-pycryptodome
-boto3
